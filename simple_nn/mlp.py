@@ -1,5 +1,5 @@
 import numpy as np
-from .utils import generate_batches, binary_log_loss
+from .utils import generate_batches, binary_log_loss, log_loss, get_y_type
 
 class MLPClassifier:
     def __init__(self, hidden_layer_sizes=(100,), learning_rate=0.001, epochs=200) -> None:
@@ -10,12 +10,21 @@ class MLPClassifier:
     
     def fit(self, X, y):
         # TODO input data validations
+        print('Training...')
+        if y.ndim == 1:
+            y = y.reshape(-1, 1)
+        self.y_type = get_y_type(y)
+        self.classes = np.unique(y)
         self.n_examples, self.n_features = X.shape
+        if self.y_type == "multiclass":
+            # convert y to one-hot encoding
+            y = np.eye(len(self.classes))[y.astype(int).ravel()]
         self.n_outputs = y.shape[1]
         self.layer_units = [self.n_features] + list(self.hidden_layer_sizes) + [self.n_outputs]
         self.n_layers = len(self.layer_units)
         self.xdtype, self.ydtype = X.dtype, y.dtype
         self._initialize_weights()
+        # print('INFO', self.y_type, self.n_outputs, self.classes, self.out_activation)
         activations = [X]+[None]*(self.n_layers-1)
         deltas = [None]*(self.n_layers-1)
         coef_gradients = []
@@ -51,10 +60,15 @@ class MLPClassifier:
 
     def predict(self, X):
         y_pred = self._forward_pass(X, only_final_layer=True)
-        y_pred = y_pred.ravel()
-        y_pred[y_pred>=0.5] = 1
-        y_pred[y_pred<0.5] = 0
-        return y_pred
+        if self.n_outputs == 1:
+            y_pred = y_pred.ravel()
+        # convert 1-hot encoding to class labels
+        if self.y_type == "multiclass":
+            y_pred = y_pred.argmax(axis=1)
+        else:
+            y_pred[y_pred>=0.5] = 1
+            y_pred[y_pred<0.5] = 0
+        return self.classes[y_pred.astype(int)]
 
     def score(self, X, y):
         y_pred = self.predict(X)
@@ -62,7 +76,10 @@ class MLPClassifier:
 
     def _initialize_weights(self):
         self.iter = 0
-        self.out_activation = "logistic"
+        if self.y_type == "multiclass":
+            self.out_activation = "softmax"
+        else:
+            self.out_activation = "logistic"
         self.coefs, self.intercepts = [], []
         # normalized xavier weight initialization
         for i in range(self.n_layers - 1):
@@ -89,6 +106,9 @@ class MLPClassifier:
                     activation = np.maximum(activation, 0, activation)
             if self.out_activation == "logistic":
                 activation = 1/(1+np.exp(-activation))
+            elif self.out_activation == 'softmax':
+                activation = np.exp(activation)
+                activation /= activation.sum(axis=1, keepdims=True)
             activations = activation
         else:
             for i in range(self.n_layers-1):
@@ -97,10 +117,16 @@ class MLPClassifier:
                     activations[i+1] = np.maximum(activations[i+1], 0, activations[i+1])
             if self.out_activation == "logistic":
                 activations[i+1] = 1/(1+np.exp(-activations[i+1]))
+            elif self.out_activation == 'softmax':
+                activations[i+1] = np.exp(activations[i+1])
+                activations[i+1] /= activations[i+1].sum(axis=1, keepdims=True)
         return activations
 
     def _backward_pass(self, X, y, activations, deltas, coef_gradients, intercept_gradients):
-        loss = binary_log_loss(y, activations[-1])
+        if self.out_activation == "logistic":
+            loss = binary_log_loss(y, activations[-1])
+        else:
+            loss = log_loss(y, activations[-1])
         values = 0
         for c in self.coefs:
             c = c.ravel()
@@ -113,7 +139,7 @@ class MLPClassifier:
         intercept_gradients[last] = deltas[last].sum(axis=0) / self.n_examples
         for i in range(self.n_layers-2, 0, -1):
             deltas[i-1] = np.matmul(deltas[i], self.coefs[i].T)
-            deltas[i-1][activations[i] <= 0] = 0
+            deltas[i-1][activations[i] == 0] = 0
             coef_gradients[i-1] = np.matmul(activations[i-1].T, deltas[i-1]) + self.alpha * self.coefs[i-1]
             coef_gradients[i-1] /= self.n_examples
             intercept_gradients[i-1] = deltas[i-1].sum(axis=0) / self.n_examples
